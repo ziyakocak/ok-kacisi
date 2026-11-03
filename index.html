@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Ok Kaçışı</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:#0d1020;color:#e8ecff;font-family:system-ui,Segoe UI,Roboto,sans-serif;overflow:hidden;user-select:none}
+  body{display:flex;flex-direction:column;background:radial-gradient(ellipse at 50% 30%,#1a2040 0%,#0d1020 70%)}
+  #hud{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 16px;height:60px;flex:none;background:rgba(0,0,0,.25);border-bottom:1px solid rgba(255,255,255,.08)}
+  #hud .side{flex:1;display:flex;align-items:center;gap:12px}
+  #hud .side.right{justify-content:flex-end}
+  #lives{font-size:28px;letter-spacing:4px;line-height:1}
+  #lives .on{color:#ff4d6d;text-shadow:0 0 10px rgba(255,77,109,.7)}
+  #lives .off{color:#3a3f5c}
+  #timer{font-size:32px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:1px;min-width:150px;text-align:center}
+  #timer.done{color:#5dffb0;text-shadow:0 0 14px rgba(93,255,176,.6)}
+  #count{font-size:15px;opacity:.8;white-space:nowrap}
+  button,select{font:inherit;color:#e8ecff;background:#262d55;border:1px solid rgba(255,255,255,.18);border-radius:8px;padding:7px 14px;cursor:pointer}
+  button:hover,select:hover{background:#323b70}
+  select option{background:#1b2040}
+  #wrap{flex:1;position:relative;min-height:0}
+  canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:manipulation}
+  #overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(8,10,22,.72);backdrop-filter:blur(3px)}
+  #overlay.show{display:flex}
+  #box{text-align:center;padding:28px 40px;background:#171c3b;border:1px solid rgba(255,255,255,.15);border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.5);max-width:90%}
+  #box h2{margin:0 0 8px;font-size:30px}
+  #box p{margin:6px 0;opacity:.85}
+  #box .big{font-size:42px;font-weight:700;font-variant-numeric:tabular-nums;margin:10px 0}
+  #box button{margin-top:14px;font-size:17px;padding:10px 24px;background:#4a5bff;border-color:#7380ff}
+  #box button:hover{background:#6171ff}
+  @media (max-width:560px){#count{display:none}#timer{font-size:24px;min-width:110px}#lives{font-size:22px}}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div class="side"><div id="lives"></div></div>
+  <div id="timer">00:00.0</div>
+  <div class="side right">
+    <span id="count"></span>
+    <button id="restart">Yeni Oyun</button>
+  </div>
+</div>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="overlay"><div id="box"></div></div>
+</div>
+
+<script>
+(() => {
+'use strict';
+const DIRS = [[1,0],[0,1],[-1,0],[0,-1]];
+const MAX_LIVES = 3;
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const wrap = document.getElementById('wrap');
+const elLives = document.getElementById('lives');
+const elTimer = document.getElementById('timer');
+const elCount = document.getElementById('count');
+const overlay = document.getElementById('overlay');
+const box = document.getElementById('box');
+
+let cols, rows, cell, ox, oy, W, H, dpr = 1;
+let arrows = [], occ, alive, lives;
+let startT = 0, endT = 0, started = false, over = false, won = false;
+let hover = -1, shakeFlash = 0;
+
+const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; };
+
+/* ---------- Bulmaca üretimi ----------
+   Oklar sırayla yerleştirilir; her yeni okun önündeki yol (kafadan kenara kadar)
+   o an BOŞ olmak zorundadır. Böylece son yerleştirilen ok ilk çıkabilir, bulmaca
+   her zaman çözülebilir ve kuyruklar yine de birbirine karmaşık şekilde dolanır. */
+function greedy() {
+  occ = new Int16Array(cols * rows).fill(-1);
+  arrows = [];
+  const total = cols * rows;
+  const cells = [...Array(total).keys()];
+  for (let pass = 0; pass < 8; pass++) {
+    shuffle(cells);
+    // merkezdeki hücreler önce, kenara yakınlar sonra: kenardaki oklar dışa açık kalır
+    const edge = c => { const x = c % cols, y = (c / cols) | 0; return Math.min(x, y, cols - 1 - x, rows - 1 - y) + Math.random() * 3; };
+    const keyed = cells.map(c => [edge(c), c]).sort((p, q) => q[0] - p[0]);
+    for (let i = 0; i < cells.length; i++) cells[i] = keyed[i][1];
+    let placed = 0;
+    for (const c of cells) {
+      if (occ[c] !== -1) continue;
+      const hx = c % cols, hy = (c / cols) | 0;
+      for (const di of shuffle([0, 1, 2, 3])) {
+        const [dx, dy] = DIRS[di];
+        const bx = hx - dx, by = hy - dy;
+        if (bx < 0 || by < 0 || bx >= cols || by >= rows || occ[by * cols + bx] !== -1) continue;
+        // önü boş mu?
+        let ok = true, x = hx + dx, y = hy + dy;
+        const ray = new Set();
+        while (x >= 0 && y >= 0 && x < cols && y < rows) {
+          const k = y * cols + x;
+          if (occ[k] !== -1) { ok = false; break; }
+          ray.add(k); x += dx; y += dy;
+        }
+        if (!ok) continue;
+        // kuyruğu rastgele yürüyüşle uzat
+        const target = 2 + Math.floor(Math.random() * Math.random() * 30) + (pass === 0 ? 3 : 0);
+        const list = [[hx, hy], [bx, by]];
+        const used = new Set([c, by * cols + bx]);
+        let last = [bx, by], lastDir = di;
+        while (list.length < target) {
+          const opts = [];
+          for (let k = 0; k < 4; k++) {
+            const nx = last[0] + DIRS[k][0], ny = last[1] + DIRS[k][1];
+            if (nx < 0 || ny < 0 || nx >= cols || ny >= rows) continue;
+            const key = ny * cols + nx;
+            if (occ[key] !== -1 || used.has(key) || ray.has(key)) continue;
+            opts.push(k);
+          }
+          if (!opts.length) break;
+          let k = (opts.includes(lastDir) && Math.random() < 0.45) ? lastDir : opts[Math.random() * opts.length | 0];
+          const nx = last[0] + DIRS[k][0], ny = last[1] + DIRS[k][1];
+          list.push([nx, ny]); used.add(ny * cols + nx);
+          last = [nx, ny]; lastDir = k;
+        }
+        list.reverse(); // kuyruk -> kafa
+        const id = arrows.length;
+        for (const [x2, y2] of list) occ[y2 * cols + x2] = id;
+        arrows.push({ id, pts: list, dir: di, hue: Math.random() * 360 | 0, state: 'idle', flash: 0, shake: 0, ext: null, t0: 0, rayLen: 0 });
+        placed++;
+        break;
+      }
+    }
+    if (!placed) break;
+  }
+}
+
+/* Çözülebilirlik denetimi: her ok, önündeki okların kalkmasını bekler (Kahn algoritması). */
+function solvable() {
+  const N = arrows.length;
+  const cnt = new Int32Array(N), stamp = new Int32Array(N).fill(-1);
+  const dep = Array.from({ length: N }, () => []);
+  for (const a of arrows) {
+    const [hx, hy] = a.pts[a.pts.length - 1], [dx, dy] = DIRS[a.dir];
+    let x = hx + dx, y = hy + dy;
+    while (x >= 0 && y >= 0 && x < cols && y < rows) {
+      const o = occ[y * cols + x];
+      if (o !== -1) {
+        if (o === a.id) return false;
+        if (stamp[o] !== a.id) { stamp[o] = a.id; cnt[a.id]++; dep[o].push(a.id); }
+      }
+      x += dx; y += dy;
+    }
+  }
+  const q = [];
+  for (let i = 0; i < N; i++) if (!cnt[i]) q.push(i);
+  let done = 0;
+  while (q.length) { const i = q.pop(); done++; for (const j of dep[i]) if (--cnt[j] === 0) q.push(j); }
+  return done === N;
+}
+
+/* Açgözlü yerleştirmeden sonra kalan boş hücreleri doldurur: önce mevcut okların
+   kuyruğunu/başını uzatır, olmazsa yeni kısa ok koyar. Her değişiklik solvable() ile doğrulanır. */
+function tryFill(c) {
+  const x = c % cols, y = (c / cols) | 0;
+  const inside = (px, py) => px >= 0 && py >= 0 && px < cols && py < rows;
+  const opts = [];
+  for (let k = 0; k < 4; k++) {
+    const nx = x + DIRS[k][0], ny = y + DIRS[k][1];
+    if (!inside(nx, ny)) continue;
+    const id = occ[ny * cols + nx];
+    if (id < 0) continue;
+    const a = arrows[id];
+    if (a.pts.length >= 36) continue;
+    if (a.pts[0][0] === nx && a.pts[0][1] === ny) opts.push({ t: 'tail', a });
+    const h = a.pts[a.pts.length - 1];
+    if (h[0] + DIRS[a.dir][0] === x && h[1] + DIRS[a.dir][1] === y) opts.push({ t: 'head', a });
+  }
+  shuffle(opts);
+  const news = [];
+  for (let k = 0; k < 4; k++) {
+    const nx = x + DIRS[k][0], ny = y + DIRS[k][1];
+    if (inside(nx, ny) && occ[ny * cols + nx] === -1) {
+      news.push({ t: 'new', pts: [[nx, ny], [x, y]], dir: (k + 2) % 4 });   // kafa c
+      news.push({ t: 'new', pts: [[x, y], [nx, ny]], dir: k });            // kafa komşu
+    }
+  }
+  shuffle(news);
+  for (let k = 0; k < 4; k++) news.push({ t: 'new', pts: [[x, y]], dir: k });
+  for (const o of opts.concat(news)) {
+    if (o.t === 'tail') {
+      o.a.pts.unshift([x, y]); occ[c] = o.a.id;
+      if (solvable()) return true;
+      o.a.pts.shift(); occ[c] = -1;
+    } else if (o.t === 'head') {
+      o.a.pts.push([x, y]); occ[c] = o.a.id;
+      if (solvable()) return true;
+      o.a.pts.pop(); occ[c] = -1;
+    } else {
+      const id = arrows.length;
+      const a = { id, pts: o.pts, dir: o.dir, hue: Math.random() * 360 | 0, state: 'idle', flash: 0, shake: 0, ext: null, t0: 0, rayLen: 0 };
+      arrows.push(a);
+      for (const [px, py] of o.pts) occ[py * cols + px] = id;
+      if (solvable()) return true;
+      arrows.pop();
+      for (const [px, py] of o.pts) occ[py * cols + px] = -1;
+    }
+  }
+  return false;
+}
+
+function fillHoles() {
+  for (let round = 0; round < 8; round++) {
+    const holes = [];
+    for (let c = 0; c < occ.length; c++) if (occ[c] === -1) holes.push(c);
+    if (!holes.length) return true;
+    shuffle(holes);
+    for (const c of holes) if (occ[c] === -1) tryFill(c);
+  }
+  return !occ.includes(-1);
+}
+
+function generate() {
+  for (let t = 0; t < 30; t++) {
+    greedy();
+    if (fillHoles()) return;
+  }
+}
+
+/* ---------- Oyun akışı ---------- */
+function computeGrid() {
+  const target = 1800;
+  const aspect = W / H;
+  rows = Math.max(6, Math.round(Math.sqrt(target / aspect)));
+  cols = Math.max(6, Math.round(rows * aspect));
+  cols = Math.min(cols, Math.floor(W / 17));
+  rows = Math.min(rows, Math.floor(H / 17));
+}
+
+function newGame() {
+  resize();
+  computeGrid();
+  layout();
+  generate();
+  alive = arrows.length;
+  lives = MAX_LIVES;
+  started = over = won = false;
+  startT = endT = 0;
+  hover = -1;
+  overlay.classList.remove('show');
+  elTimer.classList.remove('done');
+  updateHud();
+}
+
+function fmt(ms) {
+  const t = Math.floor(ms / 100);
+  const m = Math.floor(t / 600), s = Math.floor(t / 10) % 60, d = t % 10;
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0') + '.' + d;
+}
+
+function updateHud() {
+  let h = '';
+  for (let i = 0; i < MAX_LIVES; i++) h += `<span class="${i < lives ? 'on' : 'off'}">♥</span>`;
+  elLives.innerHTML = h;
+  elCount.textContent = `Kalan ok: ${alive}`;
+}
+
+function rayInfo(a) {
+  const n = a.pts.length, [hx, hy] = a.pts[n - 1], [dx, dy] = DIRS[a.dir];
+  let x = hx + dx, y = hy + dy, len = 0, blocker = -1;
+  while (x >= 0 && y >= 0 && x < cols && y < rows) {
+    const o = occ[y * cols + x];
+    if (o !== -1 && o !== a.id && blocker === -1) blocker = o;
+    len++; x += dx; y += dy;
+  }
+  return { len, blocker };
+}
+
+function press(id) {
+  if (over || won) return;
+  const a = arrows[id];
+  if (!a || a.state !== 'idle') return;
+  if (!started) { started = true; startT = performance.now(); }
+  const { len, blocker } = rayInfo(a);
+  const now = performance.now();
+  if (blocker === -1) {
+    // çıkış
+    for (const [x, y] of a.pts) occ[y * cols + x] = -1;
+    const n = a.pts.length, [hx, hy] = a.pts[n - 1], [dx, dy] = DIRS[a.dir];
+    a.ext = a.pts.slice();
+    const m = len + n + 2;
+    for (let j = 1; j <= m; j++) a.ext.push([hx + dx * j, hy + dy * j]);
+    a.rayLen = len; a.t0 = now; a.state = 'moving';
+    alive--;
+    updateHud();
+  } else {
+    a.flash = now + 500; a.shake = now + 350;
+    arrows[blocker].flash = now + 500;
+    shakeFlash = now + 250;
+    lives--;
+    updateHud();
+    if (lives <= 0) {
+      over = true; endT = now;
+      setTimeout(showOver, 700);
+    }
+  }
+}
+
+function checkWin(now) {
+  if (won || over || alive > 0) return;
+  if (arrows.some(a => a.state === 'moving')) return;
+  won = true; endT = now;
+  elTimer.classList.add('done');
+  const time = endT - startT;
+  const key = 'okkacis-best';
+  const best = +localStorage.getItem(key) || 0;
+  let note = '';
+  if (!best || time < best) { localStorage.setItem(key, time); note = best ? '🏆 Yeni rekor!' : '🏆 İlk rekorun!'; }
+  else note = `En iyi: ${fmt(best)}`;
+  box.innerHTML = `<h2>🎉 Tebrikler!</h2><p>Tüm oklar temizlendi</p><div class="big">${fmt(time)}</div><p>${note}</p><button id="again">Tekrar Oyna</button>`;
+  setTimeout(() => { overlay.classList.add('show'); document.getElementById('again').onclick = newGame; }, 500);
+}
+
+function showOver() {
+  box.innerHTML = `<h2>💔 Oyun Bitti</h2><p>Canların tükendi</p><div class="big">${alive}</div><p>ok ekranda kaldı</p><button id="again">Tekrar Dene</button>`;
+  overlay.classList.add('show');
+  document.getElementById('again').onclick = newGame;
+}
+
+/* ---------- Çizim ---------- */
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = wrap.clientWidth; H = wrap.clientHeight;
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+}
+function layout() {
+  const pad = 6;
+  cell = Math.min((W - pad * 2) / cols, (H - pad * 2) / rows);
+  ox = (W - cell * cols) / 2; oy = (H - cell * rows) / 2;
+}
+
+function snake(a, s) {
+  const n = a.pts.length, ext = a.ext || a.pts;
+  if (ext.length < 2) return [ext[0], ext[0]];
+  const end = s + n - 1;
+  const out = [];
+  const lerp = t => {
+    const i = Math.min(Math.floor(t), ext.length - 2), f = t - i;
+    return [ext[i][0] + (ext[i + 1][0] - ext[i][0]) * f, ext[i][1] + (ext[i + 1][1] - ext[i][1]) * f];
+  };
+  out.push(lerp(s));
+  for (let i = Math.ceil(s); i <= Math.floor(end); i++) if (i < ext.length) out.push(ext[i]);
+  out.push(lerp(Math.min(end, ext.length - 1)));
+  return out;
+}
+
+function drawArrow(a, now) {
+  let s = 0;
+  if (a.state === 'moving') {
+    const t = Math.max(0, now - a.t0) / 1000;
+    s = 12 * t + 0.5 * 140 * t * t;
+    if (s >= a.rayLen + a.pts.length + 1) { a.state = 'gone'; return; }
+  }
+  const pts = snake(a, s);
+  const flashing = now < a.flash;
+  const hot = a.id === hover && a.state === 'idle';
+  const col = flashing ? (Math.floor(now / 80) % 2 ? '#ff2f4f' : '#ffb3bf')
+                       : `hsl(${a.hue} ${hot ? 95 : 78}% ${hot ? 76 : 62}%)`;
+  let sx = 0;
+  if (now < a.shake) sx = Math.sin(now / 20) * cell * 0.12;
+
+  const px = p => ox + (p[0] + 0.5) * cell + sx;
+  const py = p => oy + (p[1] + 0.5) * cell;
+  const [dx, dy] = DIRS[a.dir];
+  const head = pts[pts.length - 1];
+  const hx = px(head), hy = py(head);
+
+  ctx.strokeStyle = col; ctx.fillStyle = col;
+  ctx.lineWidth = Math.max(2, cell * 0.2);
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (i === 0) ctx.moveTo(px(pts[0]), py(pts[0]));
+    ctx.lineTo(px(pts[i + 1]) - (i === pts.length - 2 ? dx * cell * 0.1 : 0),
+               py(pts[i + 1]) - (i === pts.length - 2 ? dy * cell * 0.1 : 0));
+  }
+  ctx.stroke();
+  // ok ucu
+  const tip = cell * 0.46, back = cell * 0.12, wd = cell * 0.34;
+  ctx.beginPath();
+  ctx.moveTo(hx + dx * tip, hy + dy * tip);
+  ctx.lineTo(hx - dx * back - dy * wd, hy - dy * back + dx * wd);
+  ctx.lineTo(hx - dx * back + dy * wd, hy - dy * back - dx * wd);
+  ctx.closePath(); ctx.fill();
+}
+
+function frame() {
+  requestAnimationFrame(frame);
+  try { draw(performance.now()); } catch (err) { console.error(err); }
+}
+function draw(now) {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  // tahta
+  ctx.fillStyle = 'rgba(255,255,255,.035)';
+  ctx.fillRect(ox, oy, cell * cols, cell * rows);
+  ctx.strokeStyle = 'rgba(255,255,255,.1)'; ctx.lineWidth = 1;
+  ctx.strokeRect(ox + .5, oy + .5, cell * cols - 1, cell * rows - 1);
+
+  for (const a of arrows) if (a.state !== 'gone') drawArrow(a, now);
+
+  if (now < shakeFlash) {
+    ctx.fillStyle = `rgba(255,40,70,${0.22 * (shakeFlash - now) / 250})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  if (started && !over && !won) elTimer.textContent = fmt(now - startT);
+  else if (started) elTimer.textContent = fmt(endT - startT);
+  else elTimer.textContent = '00:00.0';
+  checkWin(now);
+}
+
+/* ---------- Girdi ---------- */
+function cellAt(e) {
+  const r = canvas.getBoundingClientRect();
+  const x = Math.floor((e.clientX - r.left - ox) / cell);
+  const y = Math.floor((e.clientY - r.top - oy) / cell);
+  if (x < 0 || y < 0 || x >= cols || y >= rows) return -1;
+  return occ[y * cols + x];
+}
+canvas.addEventListener('pointerdown', e => { const id = cellAt(e); if (id >= 0) press(id); });
+canvas.addEventListener('pointermove', e => {
+  hover = e.pointerType === 'mouse' ? cellAt(e) : -1;
+  canvas.style.cursor = hover >= 0 ? 'pointer' : 'default';
+});
+canvas.addEventListener('pointerleave', () => hover = -1);
+document.getElementById('restart').onclick = newGame;
+window.addEventListener('resize', () => { resize(); layout(); });
+
+newGame();
+requestAnimationFrame(frame);
+window.__oyun = { get arrows() { return arrows; }, press, rayInfo, get state() { return { alive, lives, won, over, cols, rows }; } };
+})();
+</script>
+</body>
+</html>
