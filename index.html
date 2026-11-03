@@ -52,6 +52,7 @@
 'use strict';
 const DIRS = [[1,0],[0,1],[-1,0],[0,-1]];
 const MAX_LIVES = 3;
+const PAD = 22; // tahtanın çevresindeki boşluk (px), kenardaki okları rahat tıklamak için
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -228,11 +229,12 @@ function generate() {
 /* ---------- Oyun akışı ---------- */
 function computeGrid() {
   const target = 1800;
-  const aspect = W / H;
+  const aw = W - PAD * 2, ah = H - PAD * 2;
+  const aspect = aw / ah;
   rows = Math.max(6, Math.round(Math.sqrt(target / aspect)));
   cols = Math.max(6, Math.round(rows * aspect));
-  cols = Math.min(cols, Math.floor(W / 17));
-  rows = Math.min(rows, Math.floor(H / 17));
+  cols = Math.min(cols, Math.floor(aw / 17));
+  rows = Math.min(rows, Math.floor(ah / 17));
 }
 
 function newGame() {
@@ -332,7 +334,7 @@ function resize() {
   canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
 }
 function layout() {
-  const pad = 6;
+  const pad = PAD;
   cell = Math.min((W - pad * 2) / cols, (H - pad * 2) / rows);
   ox = (W - cell * cols) / 2; oy = (H - cell * rows) / 2;
 }
